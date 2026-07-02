@@ -47,11 +47,12 @@ async function observe(
   hookType: string,
   data: Record<string, unknown>,
 ): Promise<void> {
+  const project = sessionProjects.get(sessionId) || projectPath;
   await post("/observe", {
     hookType,
     sessionId,
-    project: projectPath,
-    cwd: projectPath,
+    project,
+    cwd: project,
     timestamp: new Date().toISOString(),
     data,
   });
@@ -60,6 +61,7 @@ async function observe(
 let activeSessionId: string | null = null;
 let pendingConfig: Record<string, unknown> | null = null;
 let projectPath: string | null = null;
+const sessionProjects = new Map<string, string>();
 const stashedFiles = new Map<string, Set<string>>();
 const seenSubtaskIds = new Map<string, Set<string>>();
 const seenToolCallIds = new Map<string, Set<string>>();
@@ -93,6 +95,13 @@ function pruneSessionMaps(sid: string): void {
   stashedFiles.delete(sid);
   seenSubtaskIds.delete(sid);
   seenToolCallIds.delete(sid);
+  sessionProjects.delete(sid);
+}
+
+async function updateSessionProject(sessionId: string, cwd: unknown): Promise<void> {
+  if (typeof cwd !== "string" || cwd.length === 0) return;
+  if (sessionProjects.get(sessionId) === cwd) return;
+  sessionProjects.set(sessionId, cwd);
 }
 
 function safeSlice(v: unknown, max: number): string {
@@ -168,7 +177,8 @@ function extractErrorMessage(err: unknown): string {
 }
 
 export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
-  projectPath = ctx.worktree || ctx.project?.id || process.cwd();
+  const currentDirectory = (ctx as any).directory || process.cwd();
+  projectPath = process.env.AGENTMEMORY_PROJECT || currentDirectory || ctx.project?.id || ctx.worktree || process.cwd();
 
   return {
     event: async ({ event }) => {
@@ -180,6 +190,11 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
         const info = props.info as Record<string, unknown> | undefined;
         activeSessionId = (info?.id as string) || props.sessionID || null;
         if (!activeSessionId) return;
+        const sessionProject = process.env.AGENTMEMORY_PROJECT
+          || (typeof info?.directory === "string" && info.directory.length > 0 ? info.directory : "")
+          || projectPath
+          || process.cwd();
+        sessionProjects.set(activeSessionId, sessionProject);
         stashedFiles.set(activeSessionId, new Set());
         seenSubtaskIds.delete(activeSessionId);
         seenToolCallIds.delete(activeSessionId);
@@ -190,11 +205,11 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
         const sessionId = activeSessionId;
         const startResult = await postJson("/session/start", {
           sessionId,
-          title: info?.title ?? null,
+          title: info?.title ?? sessionProject,
           parentID: info?.parentID ?? null,
           version: info?.version ?? null,
-          project: projectPath,
-          cwd: projectPath,
+          project: sessionProject,
+          cwd: sessionProject,
         });
         // cache the context returned at session/start so the
         // chat.system.transform hook injects it without a second fetch.
@@ -239,6 +254,9 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
         const info = props.info as Record<string, unknown> | undefined;
         const sid = (info?.id as string) || props.sessionID || activeSessionId;
         if (!sid) return;
+        if (typeof info?.directory === "string" && info.directory.length > 0) {
+          sessionProjects.set(sid, process.env.AGENTMEMORY_PROJECT || info.directory);
+        }
         await observe(sid, "session_updated", {
           title: info?.title ?? null,
           parentID: info?.parentID ?? null,
@@ -299,6 +317,10 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
         if (info.role === "assistant") {
           const sid = props.sessionID || (info.sessionID as string) || activeSessionId;
           if (!sid) return;
+          const cwd = (info as any).path?.cwd;
+          if (typeof cwd === "string" && cwd.length > 0) {
+            sessionProjects.set(sid, process.env.AGENTMEMORY_PROJECT || cwd);
+          }
           const tokens = info.tokens as Record<string, unknown> | undefined;
           const error = info.error ? extractErrorMessage(info.error) : null;
           await observe(sid, "assistant_message", {
@@ -577,6 +599,11 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
         cost_1k_input: input.model.cost?.input ?? 0,
         cost_1k_output: input.model.cost?.output ?? 0,
       });
+    },
+
+    // ── shell.env ──
+    "shell.env": async (input) => {
+      if (input.sessionID) await updateSessionProject(input.sessionID, input.cwd);
     },
 
     // ── tool.execute.before ──
