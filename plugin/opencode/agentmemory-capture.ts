@@ -639,7 +639,7 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
         if (typeof ctx !== "string" || ctx.length === 0) {
           const result = await postJson("/context", {
             sessionId: sid,
-            project: projectPath,
+            project: sessionProjects.get(sid) || projectPath,
           });
           ctx = (result as any)?.context;
         } else {
@@ -677,7 +677,7 @@ export const AgentmemoryCapturePlugin: Plugin = async (ctx) => {
 
       const result = await postJson("/context", {
         sessionId: sid,
-        project: projectPath,
+        project: sessionProjects.get(sid) || projectPath,
       });
       const ctx = (result as any)?.context;
       if (typeof ctx === "string" && ctx.length > 0) {
